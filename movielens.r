@@ -45,52 +45,60 @@ edx <- rbind(edx, removed)
 
 rm(dl, ratings, movies, test_index, temp, movielens, removed)
 
-#######
-# Create train and test set:
-test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.25, list = FALSE)
-train_set <- edx[-test_index,]
-test_set <- edx[test_index,]
-
-rm(test_index)
+###########################################################################
+## Declare a pair of functions that we'll need later
+###########################################################################
 
 # RMSE function
 RMSE <- function(true_ratings, predicted_ratings){
   sqrt(mean((true_ratings - predicted_ratings)^2))
 }
 
-### Model: The next functions will calculate the components od the model
-
-# predict ratings
-predict_ratings <- function(dataset, mu, b_i, b_u, b_g) {
+# Predict ratings
+predict_ratings <- function(dataset, mu, b_i, b_u, g_ui) {
   dataset %>% 
     left_join(b_i, by = "movieId") %>%
     left_join(b_u, by = "userId") %>%
-    left_join(b_g, by = c("userId","genres")) %>%
-    replace_na(list(b_i=0,b_u=0, b_g=0)) %>%
-    mutate(pred = mu + b_i + b_u + b_g) %>%
+    left_join(g_ui, by = c("userId","genres")) %>%
+    replace_na(list(b_i=0,b_u=0, g_ui=0)) %>%
+    mutate(pred = mu + b_i + b_u + g_ui) %>%
     pull(pred)
 }
 
-###### Regularization: Here will tune our lambda parameter, using cross validation.
+###########################################################################
+## Here start the tuning of the parameter lambda used for regularization
+###########################################################################
+
+set.seed(1)
+# Divide the edx data frame in two sets:
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.25, list = FALSE)
+tuning_set <- edx[-test_index,]
+test_set <- edx[test_index,]
+
+rm(test_index)
+
+# Define the sequence of lambdas that will be examined
 lambdas <- seq(0, 10, 0.25)
 
-# cross validation
-folds <- createFolds(train_set$rating, k = 5, list = TRUE, returnTrain = FALSE)
+# Create folds for cross validation (5 folds)
+folds <- createFolds(tuning_set$rating, k = 5, list = TRUE, returnTrain = FALSE)
 
+# for each fold
 rmses <- sapply(folds, function(cur_fold) {
   print(paste(Sys.time(), " - new fold "))
     
-  cur_train <- train_set[-cur_fold,]
-  cur_test <- train_set[cur_fold,]
-    
+  cur_train <- tuning_set[-cur_fold,]
+  cur_test <- tuning_set[cur_fold,]
+  
+  # First calculate the terms with no normalization to use them with the current fold  
   mu <- mean(cur_train$rating)
   
-  # First calculate residuals with no normalization for each fold
   # Movie effect
   b_i <- cur_train %>% 
     group_by(movieId) %>%
     summarize(b_i = sum(rating - mu)/n(), n_i = n())
-    
+  
+  # cur_join: next left join will be needed more than once. Store it to not repeat
   cur_join <- cur_train %>% 
     left_join(b_i, by="movieId")
   
@@ -98,24 +106,26 @@ rmses <- sapply(folds, function(cur_fold) {
   b_u <- cur_join %>%
     group_by(userId) %>%
     summarize(b_u = sum(rating - b_i - mu)/n(), n_u = n())
-    
+  
   cur_join <- cur_join %>%
     left_join(b_u, by="userId")
   
   # User genre preferences effect  
-  b_g <- cur_join %>%
+  g_ui <- cur_join %>%
     group_by(userId, genres) %>%
-    summarize(b_g = sum(rating - b_i - b_u - mu)/n(), n_g = n())
+    summarize(g_ui = sum(rating - b_i - b_u - mu)/n(), n_g = n())
     
   rm(cur_join, cur_train)
   
+  # cur_test: keep the left joins to not repeat this operation with each lambda
+  # note: replace_na: When there is no data, I assume no effect
   cur_test <- cur_test %>% 
     left_join(b_i, by = "movieId") %>%
     left_join(b_u, by = "userId") %>%
-    left_join(b_g, by = c("userId","genres")) %>%
-    replace_na(list(b_i=0,b_u=0, b_g=0, n_i=0.00001, n_u=0.00001, n_g=0.00001))
+    left_join(g_ui, by = c("userId","genres")) %>%
+    replace_na(list(b_i=0,b_u=0, g_ui=0, n_i=0.000001, n_u=0.000001, n_g=0.000001))
   
-  # And now, calculate rmse with each lambda
+  # For each lambda, calculate RMSE
   errors <- sapply(lambdas, function(l){
     print(paste(Sys.time(), " - Lambda ", l))
     
@@ -124,8 +134,8 @@ rmses <- sapply(folds, function(cur_fold) {
       mutate(
         b_i = b_i * n_i /(n_i + l),
         b_u = b_u * n_u /(n_u + l),
-        b_g = b_g * n_g /(n_g + l),
-        pred = mu + b_i + b_u + b_g) %>%
+        g_ui = g_ui * n_g /(n_g + l),
+        pred = mu + b_i + b_u + g_ui) %>%
       pull(pred)
     
     RMSE(predicted_ratings, cur_test$rating)
@@ -136,21 +146,22 @@ rmses <- sapply(folds, function(cur_fold) {
 
 rm(folds)
 
-rmses <- rowMeans(rmses)
+(rmses <- rowMeans(rmses))
 qplot(lambdas, rmses)  
 
 # Get the optimal lambda:
 lambda <- lambdas[which.min(rmses)]
 
-####### Evaluation with test set
-mu <- mean(train_set$rating)
+####### Evaluation of the best lambda with test set
+mu <- mean(tuning_set$rating)
 
 # Movie effect
-b_i <- train_set %>% 
+b_i <- tuning_set %>% 
   group_by(movieId) %>%
   summarize(b_i = sum(rating - mu)/(n()+lambda))
 
-cur_join <- train_set %>% 
+# cur_join: next left join will be needed more than once. Store it to not repeat
+cur_join <- tuning_set %>% 
   left_join(b_i, by="movieId")
 
 # User effect  
@@ -162,23 +173,25 @@ cur_join <- cur_join %>%
   left_join(b_u, by="userId")
 
 # User genre preferences effect  
-b_g <- cur_join %>%
+g_ui <- cur_join %>%
   group_by(userId, genres) %>%
-  summarize(b_g = sum(rating - b_i - b_u - mu)/(n()+lambda))
+  summarize(g_ui = sum(rating - b_i - b_u - mu)/(n()+lambda))
 
 rm(cur_join)
 
-predicted_ratings <- predict_ratings(test_set, mu, b_i, b_u, b_g)
+predicted_ratings <- predict_ratings(test_set, mu, b_i, b_u, g_ui)
 
+result = RMSE(predicted_ratings, test_set$rating)
+print(paste("The RMSE after tuning the lambda parameter is",result))
 
-(result = RMSE(predicted_ratings, test_set$rating))
+###########################################################################
+## Using the optimal lambda with the hole edx data frame
+###########################################################################
 
-###################################################################################
-###### Now use edx data set for training and validation to get the final score
 ## remove some not needed data
-rm(train_set, test_set, b_i, b_u, b_g, predicted_ratings)
+rm(tuning_set, test_set, b_i, b_u, g_ui, predicted_ratings, lambdas, rmses)
 
-### Train model with the hole edx dataset
+# mean of the ratings of the hole edx data frame
 mu <- mean(edx$rating)
 
 # Movie effect
@@ -198,14 +211,18 @@ cur_join <- cur_join %>%
   left_join(b_u, by="userId")
 
 # User genre preferences effect  
-b_g <- cur_join %>%
+g_ui <- cur_join %>%
   group_by(userId, genres) %>%
-  summarize(b_g = sum(rating - b_i - b_u - mu)/(n()+lambda))
+  summarize(g_ui = sum(rating - b_i - b_u - mu)/(n()+lambda))
 
 rm(cur_join)
 
-predicted_ratings <- predict_ratings(validation, mu, b_i, b_u, b_g)
+###########################################################################
+## Final result with validation data frame
+###########################################################################
+predicted_ratings <- predict_ratings(validation, mu, b_i, b_u, g_ui)
 
+result = RMSE(predicted_ratings, validation$rating)
 
-(result = RMSE(predicted_ratings, validation$rating))
-
+print("The final RMSE on the validation data frame is:")
+result
